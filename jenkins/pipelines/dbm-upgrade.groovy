@@ -69,7 +69,7 @@ pipeline {
                     echo "════════════════════════════════════════════════════════════"
                     echo "  DBmaestro UPGRADE  |  ${params.PROJECT_NAME}"
                     echo "  Environment : ${params.ENV_NAME}"
-                    echo "  Package     : ${params.PACKAGE_NAME ?: '(next available)'}"
+                    echo "  Package     : ${params.PACKAGE_NAME ?: '(select at approval gate)'}"
                     echo "════════════════════════════════════════════════════════════"
 
                     dbmGetStatus([
@@ -88,18 +88,23 @@ pipeline {
                         userName   : params.DBM_USERNAME,
                         password   : params.DBM_PASSWORD
                     ])
-                    env.AVAILABLE_PACKAGES = pkgInfo.available.join(', ') ?: '(none)'
+
+                    // Store available package list for the approval gate dropdown
+                    env.AVAILABLE_PACKAGES      = pkgInfo.available.join(', ') ?: '(none)'
+                    env.AVAILABLE_PACKAGES_LIST = pkgInfo.available.join('\n')  ?: '(none)'
                 }
             }
         }
 
         // ── Stage 2: Approval Gate ────────────────────────────────────────────
+        // If PACKAGE_NAME was left blank, a live dropdown of available packages
+        // is shown at this gate — no extra plugins required.
         stage('Approval Gate') {
             steps {
                 script {
                     dbmNotify([
                         to     : params.NOTIFY_EMAIL,
-                        subject: "APPROVAL REQUIRED – Upgrade [${params.PACKAGE_NAME ?: 'next'}] → [${params.ENV_NAME}]",
+                        subject: "APPROVAL REQUIRED – Upgrade → [${params.ENV_NAME}]",
                         type   : 'approval',
                         body   : """
                           <h3 style="margin-top:0;">An upgrade is awaiting your approval.</h3>
@@ -108,14 +113,14 @@ pipeline {
                                 <td style="padding:7px 10px;border:1px solid #e0e0e0;">${params.PROJECT_NAME}</td></tr>
                             <tr><td style="padding:7px 10px;background:#f9f9f9;border:1px solid #e0e0e0;"><b>Environment</b></td>
                                 <td style="padding:7px 10px;border:1px solid #e0e0e0;">${params.ENV_NAME}</td></tr>
-                            <tr><td style="padding:7px 10px;background:#f9f9f9;border:1px solid #e0e0e0;"><b>Package</b></td>
-                                <td style="padding:7px 10px;border:1px solid #e0e0e0;">${params.PACKAGE_NAME ?: '(next available)'}</td></tr>
+                            <tr><td style="padding:7px 10px;background:#f9f9f9;border:1px solid #e0e0e0;"><b>Package (pre-selected)</b></td>
+                                <td style="padding:7px 10px;border:1px solid #e0e0e0;">${params.PACKAGE_NAME ?: '(choose at approval gate)'}</td></tr>
+                            <tr><td style="padding:7px 10px;background:#f9f9f9;border:1px solid #e0e0e0;"><b>Available packages</b></td>
+                                <td style="padding:7px 10px;border:1px solid #e0e0e0;">${env.AVAILABLE_PACKAGES}</td></tr>
                             <tr><td style="padding:7px 10px;background:#f9f9f9;border:1px solid #e0e0e0;"><b>Backup before upgrade</b></td>
                                 <td style="padding:7px 10px;border:1px solid #e0e0e0;">${params.BACKUP_BEHAVIOR}</td></tr>
                             <tr><td style="padding:7px 10px;background:#f9f9f9;border:1px solid #e0e0e0;"><b>Restore on failure</b></td>
                                 <td style="padding:7px 10px;border:1px solid #e0e0e0;">${params.RESTORE_BEHAVIOR}</td></tr>
-                            <tr><td style="padding:7px 10px;background:#f9f9f9;border:1px solid #e0e0e0;"><b>Available packages</b></td>
-                                <td style="padding:7px 10px;border:1px solid #e0e0e0;">${env.AVAILABLE_PACKAGES}</td></tr>
                           </table>
                           <br/>
                           <p style="font-size:15px;">
@@ -125,10 +130,34 @@ pipeline {
                         """
                     ])
 
-                    input(
-                        message: "Approve upgrade of [${params.PACKAGE_NAME ?: 'next available'}] to [${params.ENV_NAME}]?",
-                        ok     : 'Approve & Deploy'
-                    )
+                    // If PACKAGE_NAME was pre-filled, confirm and proceed.
+                    // If left blank, show a live dropdown of available packages.
+                    if (params.PACKAGE_NAME?.trim()) {
+                        input(
+                            message: "Approve upgrade of [${params.PACKAGE_NAME}] to [${params.ENV_NAME}]?",
+                            ok     : 'Approve & Deploy'
+                        )
+                        env.SELECTED_PACKAGE = params.PACKAGE_NAME
+                    } else {
+                        def availableList = env.AVAILABLE_PACKAGES_LIST?.split('\n').toList() ?: []
+                        if (availableList.isEmpty() || availableList == ['(none)']) {
+                            error "No packages available to deploy to [${params.ENV_NAME}]. Run dbm-status-report to investigate."
+                        }
+                        // Show dropdown of real package names from DBmaestro
+                        def chosen = input(
+                            message: "Select package to deploy to [${params.ENV_NAME}]:",
+                            ok     : 'Approve & Deploy',
+                            parameters: [
+                                choice(
+                                    name       : 'PACKAGE',
+                                    choices    : availableList,
+                                    description: 'Available packages fetched live from DBmaestro'
+                                )
+                            ]
+                        )
+                        env.SELECTED_PACKAGE = chosen
+                        echo "Package selected at approval gate: ${env.SELECTED_PACKAGE}"
+                    }
                 }
             }
         }
@@ -137,7 +166,7 @@ pipeline {
         stage('Execute Upgrade') {
             steps {
                 script {
-                    echo "Starting DBmaestro Upgrade..."
+                    echo "Starting DBmaestro Upgrade — Package: ${env.SELECTED_PACKAGE}"
                     dbmAgent([
                         agentJar       : params.AGENT_JAR,
                         operation      : '-Upgrade',
@@ -146,7 +175,7 @@ pipeline {
                         userName       : params.DBM_USERNAME,
                         password       : params.DBM_PASSWORD,
                         envName        : params.ENV_NAME,
-                        packageName    : params.PACKAGE_NAME ?: 'True',
+                        packageName    : env.SELECTED_PACKAGE ?: 'True',
                         backupBehavior : params.BACKUP_BEHAVIOR,
                         restoreBehavior: params.RESTORE_BEHAVIOR
                     ])
@@ -177,7 +206,7 @@ pipeline {
             script {
                 dbmNotify([
                     to     : params.NOTIFY_EMAIL,
-                    subject: "SUCCESS – Upgrade [${params.PACKAGE_NAME ?: 'next'}] → [${params.ENV_NAME}]",
+                    subject: "SUCCESS – Upgrade [${env.SELECTED_PACKAGE ?: params.PACKAGE_NAME ?: 'next'}] → [${params.ENV_NAME}]",
                     type   : 'success',
                     body   : """
                       <h3 style="margin-top:0;color:#27ae60;">Upgrade completed successfully.</h3>
@@ -187,7 +216,7 @@ pipeline {
                         <tr><td style="padding:7px 10px;background:#f9f9f9;border:1px solid #e0e0e0;"><b>Environment</b></td>
                             <td style="padding:7px 10px;border:1px solid #e0e0e0;">${params.ENV_NAME}</td></tr>
                         <tr><td style="padding:7px 10px;background:#f9f9f9;border:1px solid #e0e0e0;"><b>Package deployed</b></td>
-                            <td style="padding:7px 10px;border:1px solid #e0e0e0;">${params.PACKAGE_NAME ?: '(next available)'}</td></tr>
+                            <td style="padding:7px 10px;border:1px solid #e0e0e0;">${env.SELECTED_PACKAGE ?: params.PACKAGE_NAME ?: '(next available)'}</td></tr>
                         <tr><td style="padding:7px 10px;background:#f9f9f9;border:1px solid #e0e0e0;"><b>Duration</b></td>
                             <td style="padding:7px 10px;border:1px solid #e0e0e0;">${currentBuild.durationString}</td></tr>
                       </table>
@@ -199,7 +228,7 @@ pipeline {
             script {
                 dbmNotify([
                     to     : params.NOTIFY_EMAIL,
-                    subject: "FAILED – Upgrade [${params.PACKAGE_NAME ?: 'next'}] → [${params.ENV_NAME}]",
+                    subject: "FAILED – Upgrade [${env.SELECTED_PACKAGE ?: params.PACKAGE_NAME ?: 'next'}] → [${params.ENV_NAME}]",
                     type   : 'failure',
                     body   : """
                       <h3 style="margin-top:0;color:#c0392b;">Upgrade FAILED. No automatic rollback was performed.</h3>
@@ -210,7 +239,7 @@ pipeline {
                         <tr><td style="padding:7px 10px;background:#f9f9f9;border:1px solid #e0e0e0;"><b>Environment</b></td>
                             <td style="padding:7px 10px;border:1px solid #e0e0e0;">${params.ENV_NAME}</td></tr>
                         <tr><td style="padding:7px 10px;background:#f9f9f9;border:1px solid #e0e0e0;"><b>Package</b></td>
-                            <td style="padding:7px 10px;border:1px solid #e0e0e0;">${params.PACKAGE_NAME ?: '(next available)'}</td></tr>
+                            <td style="padding:7px 10px;border:1px solid #e0e0e0;">${env.SELECTED_PACKAGE ?: params.PACKAGE_NAME ?: '(next available)'}</td></tr>
                         <tr><td style="padding:7px 10px;background:#f9f9f9;border:1px solid #e0e0e0;"><b>Rollback triggered</b></td>
                             <td style="padding:7px 10px;border:1px solid #e0e0e0;">${params.TRIGGER_ROLLBACK_ON_FAILURE}</td></tr>
                       </table>
@@ -243,7 +272,7 @@ pipeline {
             script {
                 dbmNotify([
                     to     : params.NOTIFY_EMAIL,
-                    subject: "ABORTED – Upgrade [${params.PACKAGE_NAME ?: 'next'}] → [${params.ENV_NAME}]",
+                    subject: "ABORTED – Upgrade [${env.SELECTED_PACKAGE ?: params.PACKAGE_NAME ?: 'next'}] → [${params.ENV_NAME}]",
                     type   : 'info',
                     body   : '<p>The upgrade was aborted at the approval gate or manually cancelled during execution. No changes were made.</p>'
                 ])

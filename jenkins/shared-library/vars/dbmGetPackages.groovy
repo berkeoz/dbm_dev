@@ -33,12 +33,13 @@ def call(Map cfg) {
         def allPkgs  = readJSON(text: json)
 
         // Available = State=0, enabled, not temporary, not adhoc
+        // Note: avoid closure-based .sort{} in Jenkins CPS pipelines — use toSorted instead
         def available = allPkgs.findAll { p ->
             p.State          == 0    &&
             p.IsEnabled      == true &&
             p.IsTemporary    == false &&
             p.IsAdhocPackage == false
-        }.sort { it.Id }
+        }.toSorted { a, b -> (a.Id as Integer) <=> (b.Id as Integer) }
 
         echo "┌─ Packages for [${cfg.projectName}] ──────────────────────────────────"
         echo "│  Total: ${allPkgs.size()}   Available: ${available.size()}"
