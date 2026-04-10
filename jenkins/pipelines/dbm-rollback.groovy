@@ -78,6 +78,16 @@ pipeline {
                     }
                     env.CURRENT_DEPLOYED = currentPkg ? (currentPkg.VersionName ?: currentPkg.Name) : '(unknown)'
                     echo "Currently deployed: ${env.CURRENT_DEPLOYED}"
+
+                    // Fetch all packages so the approval gate can show a rollback target dropdown
+                    def pkgInfo = dbmGetPackages([
+                        agentJar   : params.AGENT_JAR,
+                        projectName: params.PROJECT_NAME,
+                        server     : params.DBM_SERVER,
+                        userName   : params.DBM_USERNAME,
+                        password   : params.DBM_PASSWORD
+                    ])
+                    env.ALL_PACKAGES_LIST = pkgInfo.all.join('\n') ?: '(none)'
                 }
             }
         }
@@ -103,7 +113,7 @@ pipeline {
                             <tr><td style="padding:7px 10px;background:#f9f9f9;border:1px solid #e0e0e0;"><b>Currently deployed</b></td>
                                 <td style="padding:7px 10px;border:1px solid #e0e0e0;">${env.CURRENT_DEPLOYED}</td></tr>
                             <tr><td style="padding:7px 10px;background:#f9f9f9;border:1px solid #e0e0e0;"><b>Roll back to</b></td>
-                                <td style="padding:7px 10px;border:1px solid #e0e0e0;">${params.PACKAGE_NAME ?: '(previous package)'}</td></tr>
+                                <td style="padding:7px 10px;border:1px solid #e0e0e0;">${params.PACKAGE_NAME ?: '(choose at approval gate)'}</td></tr>
                             <tr><td style="padding:7px 10px;background:#f9f9f9;border:1px solid #e0e0e0;"><b>Backup before rollback</b></td>
                                 <td style="padding:7px 10px;border:1px solid #e0e0e0;">${params.BACKUP_BEHAVIOR}</td></tr>
                           </table>
@@ -115,10 +125,31 @@ pipeline {
                         """
                     ])
 
-                    input(
-                        message: "Approve rollback on [${params.ENV_NAME}]? Currently: ${env.CURRENT_DEPLOYED}",
-                        ok     : 'Approve & Rollback'
-                    )
+                    if (params.PACKAGE_NAME?.trim()) {
+                        input(
+                            message: "Approve rollback to [${params.PACKAGE_NAME}] on [${params.ENV_NAME}]? Currently: ${env.CURRENT_DEPLOYED}",
+                            ok     : 'Approve & Rollback'
+                        )
+                        env.SELECTED_PACKAGE = params.PACKAGE_NAME
+                    } else {
+                        def allList = env.ALL_PACKAGES_LIST?.split('\n').toList() ?: []
+                        if (allList.isEmpty() || allList == ['(none)']) {
+                            error "No packages found for [${params.PROJECT_NAME}]. Cannot determine rollback target."
+                        }
+                        def chosen = input(
+                            message: "Select package to roll back to on [${params.ENV_NAME}]? Currently: ${env.CURRENT_DEPLOYED}",
+                            ok     : 'Approve & Rollback',
+                            parameters: [
+                                choice(
+                                    name       : 'PACKAGE',
+                                    choices    : allList,
+                                    description: 'All packages fetched live from DBmaestro — select the version to roll back to'
+                                )
+                            ]
+                        )
+                        env.SELECTED_PACKAGE = chosen
+                        echo "Rollback target selected at approval gate: ${env.SELECTED_PACKAGE}"
+                    }
                 }
             }
         }
@@ -136,7 +167,7 @@ pipeline {
                         userName       : params.DBM_USERNAME,
                         password       : params.DBM_PASSWORD,
                         envName        : params.ENV_NAME,
-                        packageName    : params.PACKAGE_NAME ?: 'True',
+                        packageName    : env.SELECTED_PACKAGE ?: 'True',
                         backupBehavior : params.BACKUP_BEHAVIOR,
                         restoreBehavior: params.RESTORE_BEHAVIOR
                     ])
@@ -167,7 +198,7 @@ pipeline {
             script {
                 dbmNotify([
                     to     : params.NOTIFY_EMAIL,
-                    subject: "SUCCESS – Rollback completed on [${params.ENV_NAME}]",
+                    subject: "SUCCESS – Rollback to [${env.SELECTED_PACKAGE ?: params.PACKAGE_NAME ?: 'previous'}] on [${params.ENV_NAME}]",
                     type   : 'success',
                     body   : """
                       <h3 style="margin-top:0;color:#27ae60;">Rollback completed successfully.</h3>
@@ -211,7 +242,7 @@ pipeline {
             script {
                 dbmNotify([
                     to     : params.NOTIFY_EMAIL,
-                    subject: "FAILED – Rollback on [${params.ENV_NAME}]",
+                    subject: "FAILED – Rollback to [${env.SELECTED_PACKAGE ?: params.PACKAGE_NAME ?: 'previous'}] on [${params.ENV_NAME}]",
                     type   : 'failure',
                     body   : """
                       <h3 style="margin-top:0;color:#c0392b;">Rollback FAILED. Manual intervention required.</h3>
@@ -234,7 +265,7 @@ pipeline {
             script {
                 dbmNotify([
                     to     : params.NOTIFY_EMAIL,
-                    subject: "ABORTED – Rollback on [${params.ENV_NAME}]",
+                    subject: "ABORTED – Rollback to [${env.SELECTED_PACKAGE ?: params.PACKAGE_NAME ?: 'previous'}] on [${params.ENV_NAME}]",
                     type   : 'info',
                     body   : '<p>The rollback was aborted at the approval gate or manually cancelled. No changes were made.</p>'
                 ])
