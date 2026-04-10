@@ -33,23 +33,27 @@ def call(Map cfg) {
         def allPkgs  = readJSON(text: json)
 
         // Available = State=0, enabled, not temporary, not adhoc
-        // Note: avoid closure-based .sort{} in Jenkins CPS pipelines — use toSorted instead
         def available = allPkgs.findAll { p ->
             p.State          == 0    &&
             p.IsEnabled      == true &&
             p.IsTemporary    == false &&
             p.IsAdhocPackage == false
-        }.toSorted { a, b -> (a.Id as Integer) <=> (b.Id as Integer) }
+        }
+
+        // Collect names then sort as plain strings — no closure comparator needed (CPS-safe)
+        def availableNames = available.collect { it.Name as String }
+        availableNames.sort()
+        def allNames = allPkgs.collect { it.Name as String }
 
         echo "┌─ Packages for [${cfg.projectName}] ──────────────────────────────────"
-        echo "│  Total: ${allPkgs.size()}   Available: ${available.size()}"
-        available.each { p -> echo "│    ✓ ${p.Name}" }
-        if (available.isEmpty()) { echo "│    (none – project is at the latest package)" }
+        echo "│  Total: ${allNames.size()}   Available: ${availableNames.size()}"
+        availableNames.each { name -> echo "│    ✓ ${name}" }
+        if (availableNames.isEmpty()) { echo "│    (none – project is at the latest package)" }
         echo "└──────────────────────────────────────────────────────────────────"
 
         return [
-            available: available.collect { it.Name as String },
-            all      : allPkgs.collect  { it.Name as String }
+            available: availableNames,
+            all      : allNames
         ]
 
     } catch (Exception ex) {

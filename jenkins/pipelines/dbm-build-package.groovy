@@ -71,12 +71,6 @@ pipeline {
         stage('Pre-Flight – List Existing Packages') {
             steps {
                 script {
-                    echo "════════════════════════════════════════════════════════════"
-                    echo "  DBmaestro BUILD PACKAGE  |  ${params.PROJECT_NAME}"
-                    echo "  New package : ${params.PACKAGE_NAME ?: '(auto-named)'}"
-                    echo "  Type        : ${params.PACKAGE_TYPE}"
-                    echo "════════════════════════════════════════════════════════════"
-
                     def pkgInfo = dbmGetPackages([
                         agentJar   : params.AGENT_JAR,
                         projectName: params.PROJECT_NAME,
@@ -87,8 +81,33 @@ pipeline {
                     env.EXISTING_PACKAGES  = pkgInfo.all.join(', ')       ?: '(none)'
                     env.AVAILABLE_PACKAGES = pkgInfo.available.join(', ') ?: '(none)'
 
-                    if (params.PACKAGE_NAME && pkgInfo.all.contains(params.PACKAGE_NAME)) {
-                        error "Package '${params.PACKAGE_NAME}' already exists in '${params.PROJECT_NAME}'. Choose a different name."
+                    // Determine the package name to create
+                    def pkgName = params.PACKAGE_NAME?.trim() ?: ''
+                    if (!pkgName) {
+                        // Auto-name: scan all package names for V{N} pattern, find max, increment
+                        def maxVersion = 0
+                        pkgInfo.all.each { name ->
+                            if (name.startsWith('V') && name.length() > 1) {
+                                def numStr = name.substring(1).split('[^0-9]')[0]
+                                if (numStr.isInteger()) {
+                                    def v = numStr as Integer
+                                    if (v > maxVersion) { maxVersion = v }
+                                }
+                            }
+                        }
+                        pkgName = "V${maxVersion + 1}"
+                        echo "Auto-generated package name: ${pkgName} (previous highest: V${maxVersion})"
+                    }
+                    env.COMPUTED_PACKAGE_NAME = pkgName
+
+                    echo "════════════════════════════════════════════════════════════"
+                    echo "  DBmaestro BUILD PACKAGE  |  ${params.PROJECT_NAME}"
+                    echo "  New package : ${env.COMPUTED_PACKAGE_NAME}"
+                    echo "  Type        : ${params.PACKAGE_TYPE}"
+                    echo "════════════════════════════════════════════════════════════"
+
+                    if (pkgInfo.all.contains(env.COMPUTED_PACKAGE_NAME)) {
+                        error "Package '${env.COMPUTED_PACKAGE_NAME}' already exists in '${params.PROJECT_NAME}'. Choose a different name."
                     }
                 }
             }
@@ -100,7 +119,7 @@ pipeline {
                 script {
                     dbmNotify([
                         to     : params.NOTIFY_EMAIL,
-                        subject: "APPROVAL REQUIRED – Build package [${params.PACKAGE_NAME ?: 'auto'}] in [${params.PROJECT_NAME}]",
+                        subject: "APPROVAL REQUIRED – Build package [${env.COMPUTED_PACKAGE_NAME}] in [${params.PROJECT_NAME}]",
                         type   : 'approval',
                         body   : """
                           <h3 style="margin-top:0;">A new package build is awaiting your approval.</h3>
@@ -108,7 +127,7 @@ pipeline {
                             <tr><td style="padding:7px 10px;background:#f9f9f9;border:1px solid #e0e0e0;width:30%;"><b>Project</b></td>
                                 <td style="padding:7px 10px;border:1px solid #e0e0e0;">${params.PROJECT_NAME}</td></tr>
                             <tr><td style="padding:7px 10px;background:#f9f9f9;border:1px solid #e0e0e0;"><b>New package name</b></td>
-                                <td style="padding:7px 10px;border:1px solid #e0e0e0;">${params.PACKAGE_NAME ?: '(auto-named)'}</td></tr>
+                                <td style="padding:7px 10px;border:1px solid #e0e0e0;">${env.COMPUTED_PACKAGE_NAME}</td></tr>
                             <tr><td style="padding:7px 10px;background:#f9f9f9;border:1px solid #e0e0e0;"><b>Package type</b></td>
                                 <td style="padding:7px 10px;border:1px solid #e0e0e0;">${params.PACKAGE_TYPE}</td></tr>
                             <tr><td style="padding:7px 10px;background:#f9f9f9;border:1px solid #e0e0e0;"><b>Description</b></td>
@@ -127,7 +146,7 @@ pipeline {
                     ])
 
                     input(
-                        message: "Approve creation of package [${params.PACKAGE_NAME ?: 'auto'}] in [${params.PROJECT_NAME}]?",
+                        message: "Approve creation of package [${env.COMPUTED_PACKAGE_NAME}] in [${params.PROJECT_NAME}]?",
                         ok     : 'Approve & Build'
                     )
                 }
@@ -162,7 +181,7 @@ pipeline {
                         userName   : params.DBM_USERNAME,
                         password   : params.DBM_PASSWORD,
                         envName    : params.SOURCE_ENV,
-                        packageName: params.PACKAGE_NAME ?: '',
+                        packageName: env.COMPUTED_PACKAGE_NAME,
                         extraArgs  : extra
                     ])
                 }
@@ -181,10 +200,10 @@ pipeline {
                         password   : params.DBM_PASSWORD
                     ])
 
-                    if (params.PACKAGE_NAME && !pkgInfoAfter.all.contains(params.PACKAGE_NAME)) {
-                        echo "WARNING: Package '${params.PACKAGE_NAME}' not found after build. Check DBmaestro UI."
+                    if (!pkgInfoAfter.all.contains(env.COMPUTED_PACKAGE_NAME)) {
+                        echo "WARNING: Package '${env.COMPUTED_PACKAGE_NAME}' not found after build. Check DBmaestro UI."
                     } else {
-                        echo "Package confirmed in project. Available for deployment."
+                        echo "Package '${env.COMPUTED_PACKAGE_NAME}' confirmed in project. Available for deployment."
                     }
                     env.ALL_PACKAGES_AFTER = pkgInfoAfter.all.join(', ')
                 }
@@ -197,7 +216,7 @@ pipeline {
             script {
                 dbmNotify([
                     to     : params.NOTIFY_EMAIL,
-                    subject: "SUCCESS – Package [${params.PACKAGE_NAME ?: 'auto'}] built in [${params.PROJECT_NAME}]",
+                    subject: "SUCCESS – Package [${env.COMPUTED_PACKAGE_NAME}] built in [${params.PROJECT_NAME}]",
                     type   : 'success',
                     body   : """
                       <h3 style="margin-top:0;color:#27ae60;">Package built successfully.</h3>
@@ -205,7 +224,7 @@ pipeline {
                         <tr><td style="padding:7px 10px;background:#f9f9f9;border:1px solid #e0e0e0;width:30%;"><b>Project</b></td>
                             <td style="padding:7px 10px;border:1px solid #e0e0e0;">${params.PROJECT_NAME}</td></tr>
                         <tr><td style="padding:7px 10px;background:#f9f9f9;border:1px solid #e0e0e0;"><b>Package created</b></td>
-                            <td style="padding:7px 10px;border:1px solid #e0e0e0;">${params.PACKAGE_NAME ?: '(auto-named)'}</td></tr>
+                            <td style="padding:7px 10px;border:1px solid #e0e0e0;">${env.COMPUTED_PACKAGE_NAME}</td></tr>
                         <tr><td style="padding:7px 10px;background:#f9f9f9;border:1px solid #e0e0e0;"><b>Type</b></td>
                             <td style="padding:7px 10px;border:1px solid #e0e0e0;">${params.PACKAGE_TYPE}</td></tr>
                         <tr><td style="padding:7px 10px;background:#f9f9f9;border:1px solid #e0e0e0;"><b>All packages now</b></td>
@@ -227,7 +246,7 @@ pipeline {
                             string      (name: 'DBM_USERNAME', value: params.DBM_USERNAME),
                             password    (name: 'DBM_PASSWORD', value: params.DBM_PASSWORD),
                             string      (name: 'ENV_NAME',     value: params.SOURCE_ENV),
-                            string      (name: 'PACKAGE_NAME', value: params.PACKAGE_NAME),
+                            string      (name: 'PACKAGE_NAME', value: env.COMPUTED_PACKAGE_NAME),
                             string      (name: 'NOTIFY_EMAIL', value: params.NOTIFY_EMAIL),
                             string      (name: 'AGENT_JAR',    value: params.AGENT_JAR)
                         ]
@@ -239,7 +258,7 @@ pipeline {
             script {
                 dbmNotify([
                     to     : params.NOTIFY_EMAIL,
-                    subject: "FAILED – Package build [${params.PACKAGE_NAME ?: 'auto'}] in [${params.PROJECT_NAME}]",
+                    subject: "FAILED – Package build [${env.COMPUTED_PACKAGE_NAME ?: params.PACKAGE_NAME ?: 'auto'}] in [${params.PROJECT_NAME}]",
                     type   : 'failure',
                     body   : """
                       <h3 style="margin-top:0;color:#c0392b;">Package build FAILED.</h3>
@@ -253,7 +272,7 @@ pipeline {
             script {
                 dbmNotify([
                     to     : params.NOTIFY_EMAIL,
-                    subject: "ABORTED – Package build [${params.PACKAGE_NAME ?: 'auto'}] in [${params.PROJECT_NAME}]",
+                    subject: "ABORTED – Package build [${env.COMPUTED_PACKAGE_NAME ?: params.PACKAGE_NAME ?: 'auto'}] in [${params.PROJECT_NAME}]",
                     type   : 'info',
                     body   : '<p>Package build was aborted. No package was created.</p>'
                 ])
