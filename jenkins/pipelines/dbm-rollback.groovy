@@ -29,8 +29,8 @@ pipeline {
         password(name: 'DBM_PASSWORD', defaultValue: 'CJg8b8T5L97LQqsXA2ojjCFWAMTXntIo', description: 'DBmaestro account password')
 
         // ── Target ────────────────────────────────────────────────────────────
-        string(name: 'ENV_NAME',     defaultValue: 'Release Source',
-               description: 'Environment to roll back (e.g. Release Source, QA, Staging, Production)')
+        choice(name: 'ENV_NAME', choices: ['Release Source', 'QA_Env_1', 'Staging', 'Production'],
+               description: 'Environment to roll back')
         string(name: 'PACKAGE_NAME', defaultValue: '',
                description: 'Package to roll back to. Leave blank to roll back the most recently deployed package.')
 

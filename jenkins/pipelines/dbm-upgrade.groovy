@@ -37,8 +37,8 @@ pipeline {
         password(name: 'DBM_PASSWORD', defaultValue: 'CJg8b8T5L97LQqsXA2ojjCFWAMTXntIo', description: 'DBmaestro account password')
 
         // ── Target ────────────────────────────────────────────────────────────
-        string(name: 'ENV_NAME',     defaultValue: 'Release Source',
-               description: 'Target environment name exactly as it appears in DBmaestro (e.g. Release Source, QA, Staging, Production)')
+        choice(name: 'ENV_NAME', choices: ['Release Source', 'QA_Env_1', 'Staging', 'Production'],
+               description: 'Target environment name exactly as it appears in DBmaestro')
         string(name: 'PACKAGE_NAME', defaultValue: '',
                description: 'Package to deploy. Leave blank to deploy the next available package. Run dbm-status-report to see what is available.')
 
