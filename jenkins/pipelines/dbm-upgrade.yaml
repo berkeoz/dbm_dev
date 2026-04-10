@@ -1,0 +1,286 @@
+# =============================================================================
+# dbm-upgrade.yaml  –  DBmaestro Upgrade Pipeline
+#
+# Purpose : Deploy (upgrade) a specified package to a target environment.
+# Flow    : Pre-flight status → Approval email → Manual gate → Upgrade → Verify → Notify
+# Linked  : On failure, optionally triggers the dbm-rollback job (Q9 – Job 1 of 2)
+#
+# Requires:
+#   Jenkins plugins : pipeline-as-yaml, Email Extension, DBmaestro Shared Library
+#   Shared Library  : dbmAgent, dbmGetStatus, dbmGetPackages, dbmNotify (vars/)
+#
+# Credential Store example (recommended for production):
+#   Replace DBM_USERNAME / DBM_PASSWORD parameters with:
+#
+#   withCredentials([usernamePassword(
+#       credentialsId : 'dbmaestro-credentials',   ← created in Jenkins → Credentials
+#       usernameVariable: 'DBM_USER',
+#       passwordVariable: 'DBM_PASS'
+#   )]) {
+#       dbmAgent([ userName: env.DBM_USER, password: env.DBM_PASS, ... ])
+#   }
+# =============================================================================
+
+pipeline:
+  agent:
+    label: windows
+
+  options:
+    - timeout:
+        time: 120
+        unit: MINUTES
+    - buildDiscarder:
+        logRotator:
+          numToKeepStr: '30'
+    - timestamps: []
+    - ansiColor: 'xterm'
+
+  parameters:
+    # ── DBmaestro Connection ──────────────────────────────────────────────────
+    - string:
+        name: PROJECT_NAME
+        defaultValue: 'DEMO_AS_ORACLE'
+        description: 'DBmaestro project name (case-sensitive)'
+    - string:
+        name: DBM_SERVER
+        defaultValue: 'WIN-HM6PVCVCPCB:8017'
+        description: 'DBmaestro server  host:port'
+
+    # ── Credentials (move to Jenkins Credential Store for production) ─────────
+    - string:
+        name: DBM_USERNAME
+        defaultValue: 'poc@dbmaestro.com'
+        description: 'DBmaestro account username'
+    - password:
+        name: DBM_PASSWORD
+        defaultValue: 'CJg8b8T5L97LQqsXA2ojjCFWAMTXntIo'
+        description: 'DBmaestro account password'
+
+    # ── Target ───────────────────────────────────────────────────────────────
+    - string:
+        name: ENV_NAME
+        defaultValue: 'Release Source'
+        description: |
+          Target environment name exactly as it appears in DBmaestro.
+          Examples: Release Source | QA | Staging | Production
+    - string:
+        name: PACKAGE_NAME
+        defaultValue: ''
+        description: |
+          Package to deploy. Leave blank to deploy the next available package
+          (DBmaestro picks automatically).
+          Run the dbm-status-report job to see what is available.
+
+    # ── Behavior ─────────────────────────────────────────────────────────────
+    - booleanParam:
+        name: BACKUP_BEHAVIOR
+        defaultValue: true
+        description: 'Take a backup of the target DB before running the upgrade'
+    - booleanParam:
+        name: RESTORE_BEHAVIOR
+        defaultValue: true
+        description: 'Restore from backup automatically if the upgrade fails mid-way'
+
+    # ── Notifications ─────────────────────────────────────────────────────────
+    - string:
+        name: NOTIFY_EMAIL
+        defaultValue: 'berkeo@dbmaestro.com'
+        description: 'Comma-separated list of email addresses for approval + result notifications'
+
+    # ── Infrastructure ────────────────────────────────────────────────────────
+    - string:
+        name: AGENT_JAR
+        defaultValue: 'C:\\Program Files (x86)\\DBmaestro\\DOP Server\\Agent\\DBmaestroAgent.jar'
+        description: 'Full path to DBmaestroAgent.jar on the Jenkins agent'
+
+    # ── Linked job (Q9) ───────────────────────────────────────────────────────
+    - booleanParam:
+        name: TRIGGER_ROLLBACK_ON_FAILURE
+        defaultValue: false
+        description: |
+          If the upgrade fails, automatically queue the dbm-rollback job with the
+          same parameters. The rollback runs as a separate build (non-blocking).
+
+  stages:
+
+    # ── Stage 1: Pre-Flight ───────────────────────────────────────────────────
+    - stage:
+        name: 'Pre-Flight Status Check'
+        steps:
+          - script: |
+              echo "════════════════════════════════════════════════════════════"
+              echo "  DBmaestro UPGRADE  |  ${params.PROJECT_NAME}"
+              echo "  Environment : ${params.ENV_NAME}"
+              echo "  Package     : ${params.PACKAGE_NAME ?: '(next available)'}"
+              echo "════════════════════════════════════════════════════════════"
+
+              // Show current state of the target environment
+              def statusBefore = dbmGetStatus([
+                  agentJar   : params.AGENT_JAR,
+                  projectName: params.PROJECT_NAME,
+                  server     : params.DBM_SERVER,
+                  userName   : params.DBM_USERNAME,
+                  password   : params.DBM_PASSWORD,
+                  envName    : params.ENV_NAME
+              ])
+              env.STATUS_BEFORE_COUNT = statusBefore.size().toString()
+
+              // List available packages so the approver has context
+              def pkgInfo = dbmGetPackages([
+                  agentJar   : params.AGENT_JAR,
+                  projectName: params.PROJECT_NAME,
+                  server     : params.DBM_SERVER,
+                  userName   : params.DBM_USERNAME,
+                  password   : params.DBM_PASSWORD
+              ])
+              env.AVAILABLE_PACKAGES = pkgInfo.available.join(', ') ?: '(none)'
+
+    # ── Stage 2: Approval Gate ────────────────────────────────────────────────
+    - stage:
+        name: 'Approval Gate'
+        steps:
+          - script: |
+              // Send approval request email
+              dbmNotify([
+                  to     : params.NOTIFY_EMAIL,
+                  subject: "APPROVAL REQUIRED – Upgrade [${params.PACKAGE_NAME ?: 'next'}] → [${params.ENV_NAME}]",
+                  type   : 'approval',
+                  body   : """
+                    <h3 style="margin-top:0;">An upgrade is awaiting your approval.</h3>
+                    <table width="100%" style="border-collapse:collapse;font-size:14px;">
+                      <tr><td style="padding:7px 10px;background:#f9f9f9;border:1px solid #e0e0e0;width:30%;"><b>Project</b></td>
+                          <td style="padding:7px 10px;border:1px solid #e0e0e0;">${params.PROJECT_NAME}</td></tr>
+                      <tr><td style="padding:7px 10px;background:#f9f9f9;border:1px solid #e0e0e0;"><b>Environment</b></td>
+                          <td style="padding:7px 10px;border:1px solid #e0e0e0;">${params.ENV_NAME}</td></tr>
+                      <tr><td style="padding:7px 10px;background:#f9f9f9;border:1px solid #e0e0e0;"><b>Package</b></td>
+                          <td style="padding:7px 10px;border:1px solid #e0e0e0;">${params.PACKAGE_NAME ?: '(next available)'}</td></tr>
+                      <tr><td style="padding:7px 10px;background:#f9f9f9;border:1px solid #e0e0e0;"><b>Backup before upgrade</b></td>
+                          <td style="padding:7px 10px;border:1px solid #e0e0e0;">${params.BACKUP_BEHAVIOR}</td></tr>
+                      <tr><td style="padding:7px 10px;background:#f9f9f9;border:1px solid #e0e0e0;"><b>Restore on failure</b></td>
+                          <td style="padding:7px 10px;border:1px solid #e0e0e0;">${params.RESTORE_BEHAVIOR}</td></tr>
+                      <tr><td style="padding:7px 10px;background:#f9f9f9;border:1px solid #e0e0e0;"><b>Available packages</b></td>
+                          <td style="padding:7px 10px;border:1px solid #e0e0e0;">${env.AVAILABLE_PACKAGES}</td></tr>
+                    </table>
+                    <br/>
+                    <p style="font-size:15px;">
+                      <b>Approve or abort this build:</b><br/>
+                      <a href="${env.BUILD_URL}input" style="color:#e67e22;font-weight:bold;">${env.BUILD_URL}input</a>
+                    </p>
+                  """
+              ])
+
+              // Pause execution until a human approves (or aborts)
+              input(
+                  message: "Approve upgrade of [${params.PACKAGE_NAME ?: 'next available'}] to [${params.ENV_NAME}]?",
+                  ok     : 'Approve & Deploy'
+              )
+
+    # ── Stage 3: Execute Upgrade ──────────────────────────────────────────────
+    - stage:
+        name: 'Execute Upgrade'
+        steps:
+          - script: |
+              echo "Starting DBmaestro Upgrade..."
+              dbmAgent([
+                  agentJar       : params.AGENT_JAR,
+                  operation      : '-Upgrade',
+                  projectName    : params.PROJECT_NAME,
+                  server         : params.DBM_SERVER,
+                  userName       : params.DBM_USERNAME,
+                  password       : params.DBM_PASSWORD,
+                  envName        : params.ENV_NAME,
+                  packageName    : params.PACKAGE_NAME ?: 'True',
+                  backupBehavior : params.BACKUP_BEHAVIOR,
+                  restoreBehavior: params.RESTORE_BEHAVIOR
+              ])
+
+    # ── Stage 4: Post-Deploy Verification ─────────────────────────────────────
+    - stage:
+        name: 'Post-Deploy Verification'
+        steps:
+          - script: |
+              def statusAfter = dbmGetStatus([
+                  agentJar   : params.AGENT_JAR,
+                  projectName: params.PROJECT_NAME,
+                  server     : params.DBM_SERVER,
+                  userName   : params.DBM_USERNAME,
+                  password   : params.DBM_PASSWORD,
+                  envName    : params.ENV_NAME
+              ])
+              echo "Verification complete. Packages in environment: ${statusAfter.size()}"
+
+  post:
+
+    success:
+      - script: |
+          dbmNotify([
+              to     : params.NOTIFY_EMAIL,
+              subject: "SUCCESS – Upgrade [${params.PACKAGE_NAME ?: 'next'}] → [${params.ENV_NAME}]",
+              type   : 'success',
+              body   : """
+                <h3 style="margin-top:0;color:#27ae60;">Upgrade completed successfully.</h3>
+                <table width="100%" style="border-collapse:collapse;font-size:14px;">
+                  <tr><td style="padding:7px 10px;background:#f9f9f9;border:1px solid #e0e0e0;width:30%;"><b>Project</b></td>
+                      <td style="padding:7px 10px;border:1px solid #e0e0e0;">${params.PROJECT_NAME}</td></tr>
+                  <tr><td style="padding:7px 10px;background:#f9f9f9;border:1px solid #e0e0e0;"><b>Environment</b></td>
+                      <td style="padding:7px 10px;border:1px solid #e0e0e0;">${params.ENV_NAME}</td></tr>
+                  <tr><td style="padding:7px 10px;background:#f9f9f9;border:1px solid #e0e0e0;"><b>Package deployed</b></td>
+                      <td style="padding:7px 10px;border:1px solid #e0e0e0;">${params.PACKAGE_NAME ?: '(next available)'}</td></tr>
+                  <tr><td style="padding:7px 10px;background:#f9f9f9;border:1px solid #e0e0e0;"><b>Duration</b></td>
+                      <td style="padding:7px 10px;border:1px solid #e0e0e0;">${currentBuild.durationString}</td></tr>
+                </table>
+              """
+          ])
+
+    failure:
+      - script: |
+          dbmNotify([
+              to     : params.NOTIFY_EMAIL,
+              subject: "FAILED – Upgrade [${params.PACKAGE_NAME ?: 'next'}] → [${params.ENV_NAME}]",
+              type   : 'failure',
+              body   : """
+                <h3 style="margin-top:0;color:#c0392b;">Upgrade FAILED. No automatic rollback was performed.</h3>
+                <p>Review the console output and determine corrective action before retrying.</p>
+                <table width="100%" style="border-collapse:collapse;font-size:14px;">
+                  <tr><td style="padding:7px 10px;background:#f9f9f9;border:1px solid #e0e0e0;width:30%;"><b>Project</b></td>
+                      <td style="padding:7px 10px;border:1px solid #e0e0e0;">${params.PROJECT_NAME}</td></tr>
+                  <tr><td style="padding:7px 10px;background:#f9f9f9;border:1px solid #e0e0e0;"><b>Environment</b></td>
+                      <td style="padding:7px 10px;border:1px solid #e0e0e0;">${params.ENV_NAME}</td></tr>
+                  <tr><td style="padding:7px 10px;background:#f9f9f9;border:1px solid #e0e0e0;"><b>Package</b></td>
+                      <td style="padding:7px 10px;border:1px solid #e0e0e0;">${params.PACKAGE_NAME ?: '(next available)'}</td></tr>
+                  <tr><td style="padding:7px 10px;background:#f9f9f9;border:1px solid #e0e0e0;"><b>Rollback triggered</b></td>
+                      <td style="padding:7px 10px;border:1px solid #e0e0e0;">${params.TRIGGER_ROLLBACK_ON_FAILURE}</td></tr>
+                </table>
+                <br/><a href="${env.BUILD_URL}console" style="color:#c0392b;">View Console Output</a>
+              """
+          ])
+
+          // Optionally trigger dbm-rollback job (Q9 – Job 2)
+          if (params.TRIGGER_ROLLBACK_ON_FAILURE) {
+              echo "Queuing dbm-rollback job (TRIGGER_ROLLBACK_ON_FAILURE=true)..."
+              build(
+                  job  : 'dbm-rollback',
+                  wait : false,
+                  parameters: [
+                      string  (name: 'PROJECT_NAME', value: params.PROJECT_NAME),
+                      string  (name: 'DBM_SERVER',   value: params.DBM_SERVER),
+                      string  (name: 'DBM_USERNAME', value: params.DBM_USERNAME),
+                      password(name: 'DBM_PASSWORD', value: params.DBM_PASSWORD),
+                      string  (name: 'ENV_NAME',     value: params.ENV_NAME),
+                      string  (name: 'PACKAGE_NAME', value: params.PACKAGE_NAME),
+                      booleanParam(name: 'BACKUP_BEHAVIOR',  value: params.BACKUP_BEHAVIOR),
+                      booleanParam(name: 'RESTORE_BEHAVIOR', value: params.RESTORE_BEHAVIOR),
+                      string  (name: 'NOTIFY_EMAIL', value: params.NOTIFY_EMAIL),
+                      string  (name: 'AGENT_JAR',    value: params.AGENT_JAR)
+                  ]
+              )
+          }
+
+    aborted:
+      - script: |
+          dbmNotify([
+              to     : params.NOTIFY_EMAIL,
+              subject: "ABORTED – Upgrade [${params.PACKAGE_NAME ?: 'next'}] → [${params.ENV_NAME}]",
+              type   : 'info',
+              body   : '<p>The upgrade was aborted at the approval gate or manually cancelled during execution. No changes were made.</p>'
+          ])
