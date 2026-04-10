@@ -47,6 +47,14 @@ pipeline {
         string(name: 'SOURCE_ENV', defaultValue: 'Release Source',
                description: 'Source environment from which the package is built')
 
+        // ── Build options ─────────────────────────────────────────────────────
+        string(name: 'BRANCH_NAME', defaultValue: 'rs',
+               description: 'Source control branch name used by DBmaestro for the build (e.g. rs, main, master)')
+        choice(name: 'VERSION_TYPE', choices: ['Latest Revision', 'Label'],
+               description: 'Version type passed to -VersionType in the DBmaestro build command')
+        booleanParam(name: 'CREATE_DOWNGRADE_SCRIPTS', defaultValue: true,
+                     description: 'Generate downgrade scripts as part of the package build (-CreateDowngradeScripts)')
+
         // ── Advanced ──────────────────────────────────────────────────────────
         string(name: 'EXTRA_ARGS', defaultValue: '',
                description: 'Space-separated extra CLI arguments passed verbatim to DBmaestroAgent.jar (e.g. -Force -DryRun)')
@@ -134,6 +142,10 @@ pipeline {
                                 <td style="padding:7px 10px;border:1px solid #e0e0e0;">${params.PACKAGE_DESCRIPTION ?: '—'}</td></tr>
                             <tr><td style="padding:7px 10px;background:#f9f9f9;border:1px solid #e0e0e0;"><b>Source environment</b></td>
                                 <td style="padding:7px 10px;border:1px solid #e0e0e0;">${params.SOURCE_ENV}</td></tr>
+                            <tr><td style="padding:7px 10px;background:#f9f9f9;border:1px solid #e0e0e0;"><b>Branch</b></td>
+                                <td style="padding:7px 10px;border:1px solid #e0e0e0;">${params.BRANCH_NAME}</td></tr>
+                            <tr><td style="padding:7px 10px;background:#f9f9f9;border:1px solid #e0e0e0;"><b>Version type</b></td>
+                                <td style="padding:7px 10px;border:1px solid #e0e0e0;">${params.VERSION_TYPE}</td></tr>
                             <tr><td style="padding:7px 10px;background:#f9f9f9;border:1px solid #e0e0e0;"><b>Existing packages</b></td>
                                 <td style="padding:7px 10px;border:1px solid #e0e0e0;">${env.EXISTING_PACKAGES}</td></tr>
                           </table>
@@ -160,6 +172,11 @@ pipeline {
                     echo "Creating DBmaestro package..."
 
                     def extra = []
+                    extra << '-CreatePackage'         << 'True'
+                    extra << '-CreateDowngradeScripts' << (params.CREATE_DOWNGRADE_SCRIPTS ? 'True' : 'False')
+                    extra << '-VersionType'            << "\"${params.VERSION_TYPE}\""
+                    extra << '-BranchName'             << "\"${params.BRANCH_NAME}\""
+
                     if (params.PACKAGE_TYPE == 'AdHoc') {
                         extra << '-IsAdhoc' << 'True'
                     }
@@ -170,12 +187,9 @@ pipeline {
                         extra.addAll(params.EXTRA_ARGS.trim().split(/\s+/).toList())
                     }
 
-                    // NOTE: Verify -CreatePackage is the correct flag for your DBmaestro version.
-                    // Check the Automation tab in the UI at:
-                    //   http://localhost:88/project/<id>/environment/<id>/automation
                     dbmAgent([
                         agentJar   : params.AGENT_JAR,
-                        operation  : '-CreatePackage',
+                        operation  : '-Build',
                         projectName: params.PROJECT_NAME,
                         server     : params.DBM_SERVER,
                         userName   : params.DBM_USERNAME,
