@@ -110,6 +110,16 @@ def dbmNotify(Map cfg) {
     """)
 }
 
+// ── Inlined: jiraComment ─────────────────────────────────────────────────────
+def jiraComment(String issueKey, String body) {
+    if (!issueKey?.trim()) { return }
+    try {
+        jiraAddComment idOrKey: issueKey, comment: body, site: 'Jira Cloud'
+    } catch (Exception ex) {
+        echo "WARNING: Could not post Jira comment to ${issueKey}: ${ex.message}"
+    }
+}
+
 // =============================================================================
 // Pipeline
 // =============================================================================
@@ -139,6 +149,7 @@ pipeline {
                description: 'Full path to DBmaestroAgent.jar')
         booleanParam(name: 'TRIGGER_ROLLBACK_ON_FAILURE', defaultValue: false,
                      description: 'Queue dbm-rollback job automatically if upgrade fails')
+        string(name: 'JIRA_ISSUE_KEY', defaultValue: '', description: 'Jira issue key to update on completion (e.g. DBM-42). Leave blank if not triggered from Jira.')
     }
 
     stages {
@@ -257,6 +268,7 @@ pipeline {
                       </table>
                     """
                 ])
+                jiraComment(params.JIRA_ISSUE_KEY, "✅ *DBmaestro Upgrade succeeded*\nPackage: *${env.SELECTED_PACKAGE ?: params.PACKAGE_NAME}* deployed to *${params.ENV_NAME}*\n[View build log|${env.BUILD_URL}console]")
             }
         }
         failure {
@@ -293,6 +305,7 @@ pipeline {
                         string(name: 'AGENT_JAR',    value: params.AGENT_JAR)
                     ])
                 }
+                jiraComment(params.JIRA_ISSUE_KEY, "❌ *DBmaestro Upgrade FAILED*\nPackage: *${env.SELECTED_PACKAGE ?: params.PACKAGE_NAME}* → *${params.ENV_NAME}*\n[View build log|${env.BUILD_URL}console]")
             }
         }
         aborted {
