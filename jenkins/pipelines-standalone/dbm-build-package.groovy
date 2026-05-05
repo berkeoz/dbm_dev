@@ -88,7 +88,7 @@ def dbmNotify(Map cfg) {
 def jiraComment(String issueKey, String body) {
     if (!issueKey?.trim()) { return }
     try {
-        jiraAddComment idOrKey: issueKey, comment: body
+        jiraAddComment idOrKey: issueKey, comment: body, site: 'Jira Cloud'
     } catch (Exception ex) {
         echo "WARNING: Could not post Jira comment to ${issueKey}: ${ex.message}"
     }
