@@ -108,6 +108,16 @@ def dbmNotify(Map cfg) {
     """)
 }
 
+// ── Inlined: jiraComment ─────────────────────────────────────────────────────
+def jiraComment(String issueKey, String body) {
+    if (!issueKey?.trim()) { return }
+    try {
+        jiraAddComment idOrKey: issueKey, comment: body
+    } catch (Exception ex) {
+        echo "WARNING: Could not post Jira comment to ${issueKey}: ${ex.message}"
+    }
+}
+
 // =============================================================================
 // Pipeline
 // =============================================================================
@@ -134,6 +144,7 @@ pipeline {
         string(name: 'AGENT_JAR',
                defaultValue: 'C:\\Program Files (x86)\\DBmaestro\\DOP Server\\Agent\\DBmaestroAgent.jar',
                description: 'Full path to DBmaestroAgent.jar on the Jenkins agent')
+        string(name: 'JIRA_ISSUE_KEY', defaultValue: '', description: 'Jira issue key to update on completion (e.g. DBM-42). Leave blank if not triggered from Jira.')
     }
 
     stages {
@@ -265,6 +276,7 @@ pipeline {
                         """
                     ])
                 }
+                jiraComment(params.JIRA_ISSUE_KEY, "✅ *DBmaestro Status Report completed*\nProject: *${params.PROJECT_NAME}*\n[View build log|${env.BUILD_URL}console]")
             }
         }
         failure {
@@ -279,6 +291,7 @@ pipeline {
                       <br/><a href="${env.BUILD_URL}console" style="color:#c0392b;">View Console Output</a>
                     """
                 ])
+                jiraComment(params.JIRA_ISSUE_KEY, "❌ *DBmaestro Status Report FAILED*\nProject: *${params.PROJECT_NAME}*\n[View build log|${env.BUILD_URL}console]")
             }
         }
     }
